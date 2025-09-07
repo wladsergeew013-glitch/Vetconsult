@@ -1,3 +1,5 @@
+#файл для функций с базой postgres
+
 import psycopg
 from psycopg.rows import dict_row
 from rich.console import Console

@@ -1,3 +1,5 @@
+#скрипт для тестирования функций local postgres.py
+
 from local_postgres import run_query, fetch_rows
 
 run_query("SELECT * FROM public.documents", limit=1)

@@ -1,3 +1,5 @@
+# Загрузка документов в базу Postgres
+
 from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row
@@ -5,10 +7,20 @@ from striprtf.striprtf import rtf_to_text
 
 from local_postgres import load_db_config, run_query
 
+# Имя таблицы, в которую будут сохраняться документы
 TABLE_NAME = "vetconsult_documents"
+# Папка, из которой загружаются документы
 DOCS_FOLDER = Path("documents")
 
+
 def ensure_table_exists():
+    """
+    Создаёт таблицу в базе данных, если она ещё не существует.
+    Таблица содержит:
+      - id: уникальный идентификатор
+      - filename: имя файла (уникальное)
+      - content: текстовое содержимое документа
+    """
     cfg = load_db_config()
     conn = psycopg.connect(**cfg, row_factory=dict_row)
     with conn.cursor() as cur:
@@ -22,7 +34,13 @@ def ensure_table_exists():
         conn.commit()
     conn.close()
 
+
 def get_existing_filenames():
+    """
+    Возвращает множество имён файлов, которые уже есть в базе.
+    Нужно, чтобы не загружать дубликаты и понимать,
+    какие файлы нужно обновить.
+    """
     cfg = load_db_config()
     conn = psycopg.connect(**cfg, row_factory=dict_row)
     with conn.cursor() as cur:
@@ -31,7 +49,12 @@ def get_existing_filenames():
     conn.close()
     return {row["filename"] for row in rows}
 
+
 def insert_document(filename: str, content: str):
+    """
+    Вставляет новый документ в базу.
+    Если документ с таким filename уже есть, то вставка игнорируется (ON CONFLICT DO NOTHING).
+    """
     cfg = load_db_config()
     conn = psycopg.connect(**cfg, row_factory=dict_row)
     with conn.cursor() as cur:
@@ -42,7 +65,11 @@ def insert_document(filename: str, content: str):
         conn.commit()
     conn.close()
 
+
 def update_document(filename: str, content: str):
+    """
+    Обновляет текст существующего документа по имени файла.
+    """
     cfg = load_db_config()
     conn = psycopg.connect(**cfg, row_factory=dict_row)
     with conn.cursor() as cur:
@@ -53,8 +80,13 @@ def update_document(filename: str, content: str):
         conn.commit()
     conn.close()
 
+
 def decode_best(raw_bytes: bytes) -> str:
-    """Пробует разные кодировки и выбирает ту, где больше кириллицы"""
+    """
+    Пробует декодировать байтовые данные разными кодировками (utf-8, cp1251, latin1).
+    Выбирает ту кодировку, в которой в тексте больше всего кириллических символов.
+    Это полезно для файлов с неизвестной или некорректной кодировкой.
+    """
     encodings = ["utf-8", "cp1251", "latin1"]
     best_text = ""
     best_score = -1
@@ -63,20 +95,35 @@ def decode_best(raw_bytes: bytes) -> str:
             text = raw_bytes.decode(enc, errors="ignore")
         except UnicodeDecodeError:
             continue
-        cyr_count = sum(0x0400 <= ord(c) <= 0x04FF for c in text)
+        cyr_count = sum(0x0400 <= ord(c) <= 0x04FF for c in text)  # считаем количество кириллических символов
         score = cyr_count / max(len(text), 1)
         if score > best_score:
             best_text = text
             best_score = score
     return best_text
 
+
 def read_rtf_file(file_path: Path) -> str:
+    """
+    Читает RTF-файл, определяет правильную кодировку, преобразует его в обычный текст.
+    Использует библиотеку striprtf для извлечения текста.
+    """
     with open(file_path, "rb") as f:
         raw_bytes = f.read()
     decoded_text = decode_best(raw_bytes)
     return rtf_to_text(decoded_text)
 
+
 def main():
+    """
+    Основная функция:
+      1. Создаёт таблицу при необходимости.
+      2. Получает список файлов, которые уже есть в базе.
+      3. Сканирует папку documents на наличие *.rtf файлов.
+      4. Спрашивает у пользователя, нужно ли перезаписывать старые документы.
+      5. Добавляет новые документы, обновляет или пропускает существующие.
+      6. В конце выводит статистику и показывает содержимое таблицы.
+    """
     ensure_table_exists()
     existing_files = get_existing_filenames()
 
@@ -84,7 +131,7 @@ def main():
         print(f"[!] Папка {DOCS_FOLDER} не найдена")
         return
 
-    # Спрашиваем один раз про перезапись
+    # Спрашиваем у пользователя, нужно ли перезаписывать существующие документы
     overwrite = False
     if existing_files:
         choice = input(f"[?] Найдено {len(existing_files)} документов в базе. Перезаписать их текст? (y/n): ").strip().lower()
@@ -92,6 +139,7 @@ def main():
 
     added_count, updated_count, skipped_count = 0, 0, 0
 
+    # Обрабатываем все RTF-файлы в папке
     for file_path in DOCS_FOLDER.glob("*.rtf"):
         text_content = read_rtf_file(file_path)
 
@@ -108,9 +156,11 @@ def main():
             added_count += 1
             print(f"[+] Добавлен: {file_path.name}")
 
+    # Итоговая статистика
     print(f"\nГотово. Добавлено {added_count}, обновлено {updated_count}, пропущено {skipped_count}.")
     print("\nСодержимое таблицы:")
     run_query(TABLE_NAME, limit=20)
+
 
 if __name__ == "__main__":
     main()
